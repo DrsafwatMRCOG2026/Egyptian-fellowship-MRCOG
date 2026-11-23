@@ -1,0 +1,84 @@
+
+name: MRCOG Part 2 Daily Source Monitor
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check official sources
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, hashlib, urllib.request
+          import subprocess
+          from pathlib import Path
+          from datetime import datetime, timezone
+
+          sources = {
+            "RCOG Guidelines": "https://www.rcog.org.uk/guidance/",
+            "NICE Guidance": "https://www.nice.org.uk/guidance",
+            "WHO Publications": "https://www.who.int/publications"
+          }
+
+          path = Path("source-monitor-state.json")
+          old = json.loads(path.read_text()) if path.exists() else {}
+          new = dict(old)
+          changes = []
+
+          for name, url in sources.items():
+            try:
+              req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0"}
+              )
+              with urllib.request.urlopen(req, timeout=25) as r:
+                content = r.read()
+              digest = hashlib.sha256(content).hexdigest()
+              if name in old and old[name] != digest:
+                changes.append((name, url))
+              new[name] = digest
+              print(name, "checked")
+            except Exception as e:
+              print(name, "check failed:", e)
+
+          path.write_text(json.dumps(new, indent=2) + "\n")
+
+          if changes:
+            today = datetime.now(timezone.utc).date()
+            body = (
+              "Automated source-page change alert.\n\n"
+              "These changes are NOT verified clinical updates.\n"
+              "Manual review is required before changing questions.\n\n"
+            )
+            for name, url in changes:
+              body += f"- {name}: {url}\n"
+            subprocess.run([
+              "gh", "issue", "create",
+              "--title", f"MRCOG source review - {today}",
+              "--body", body
+            ], check=True)
+          PY
+
+      - name: Save monitoring state
+        run: |
+          if [ -f source-monitor-state.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add source-monitor-state.json
+            if ! git diff --cached --quiet; then
+              git commit -m "Update source monitoring state"
+              git push
+            fi
+          fi
